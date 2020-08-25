@@ -1,0 +1,525 @@
+//=============================================================================================
+// Computer Graphics Homework
+//
+// Name: Yifang Meng
+// Neptun code: I14Y77
+// 
+// I hereby declare that the homework has been made by me, including the problem interpretation,
+// algorithm selection, and coding. Should I use materials and programs not from the course webpage, 
+// the sources are clearly indentified as a comment in the code. 
+//=============================================================================================
+#include "framework.h"
+
+// vertex shader in GLSL: It is a Raw string (C++11) since it contains new line characters
+const char* const vertexSource = R"(
+	#version 330				// Shader 3.3
+	precision highp float;		// normal floats, makes no difference on desktop computers
+
+	uniform mat4 MVP;			// uniform variable, the Model-View-Projection transformation matrix
+	layout(location = 0) in vec2 vp;	// Varying input: vp = vertex position is expected in attrib array 0
+
+	void main() {
+		gl_Position = vec4(vp.x, vp.y, 0, 1) * MVP;		// transform vp from modeling space to normalized device space
+	}
+)";
+
+// fragment shader in GLSL
+const char* const fragmentSource = R"(
+	#version 330			// Shader 3.3
+	precision highp float;	// normal floats, makes no difference on desktop computers
+	
+	uniform vec3 color;		// uniform variable, the color of the primitive
+	out vec4 outColor;		// computed color of the current pixel
+
+	void main() {
+		outColor = vec4(color, 1);	// computed color is the color of the primitive
+	}
+)";
+
+GPUProgram gpuProgram; // vertex and fragment shaders
+mat4 MVPtransf = { 1, 0, 0, 0,    // MVP matrix, 
+				   0, 1, 0, 0,    // row-major!
+				   0, 0, 1, 0,
+				   0, 0, 0, 1 };
+
+class RegularTriangle {
+private:
+	std::vector<vec2> vertices;
+	vec3 color;
+
+	unsigned int vao;
+	unsigned int vbo;
+
+public:
+	RegularTriangle(vec2 v1, vec2 v2, vec2 v3, vec3 _color = vec3(0, 0, 0)) :color(_color) {
+		vertices.push_back(v1);
+		vertices.push_back(v2);
+		vertices.push_back(v3);
+
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2)*vertices.size(), &vertices[0], GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	}
+
+	RegularTriangle(std::vector<vec2> v) {
+		vertices = v;
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2)*vertices.size(), &vertices[0], GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	}
+	void setColor(vec3 _color) {
+		color = _color;
+	}
+	void Display() {
+		//set color
+		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(colorLocation, color.x, color.y, color.z);
+		//set MVP
+		int MVPLocation = glGetUniformLocation(gpuProgram.getId(), "MVP");
+		glUniformMatrix4fv(MVPLocation, 1, GL_TRUE, &MVPtransf[0][0]);
+		//display
+		glBindVertexArray(vao);	 // Draw call
+		glDrawArrays(GL_TRIANGLES, 0, vertices.size());
+	}
+};
+
+class Vertex {
+private:
+	vec2 position;
+	float size;
+	vec3 color;
+
+	unsigned int vao;
+	unsigned int vbo;
+
+public:
+	Vertex(vec2 _position, vec3 _color = vec3(1, 0, 0), float _size = 5) :position(_position), color(_color), size(_size) {
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2), &position, GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	}
+	void setColor(vec3 c) {
+		color = c;
+	}
+	vec2 getPosition() { return position; }
+	void setSize(float _size) { size = _size; }
+
+	void Display() {
+		//set color
+		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(colorLocation, color.x, color.y, color.z);
+		//set MVP
+		int MVPLocation = glGetUniformLocation(gpuProgram.getId(), "MVP");
+		glUniformMatrix4fv(MVPLocation, 1, GL_TRUE, &MVPtransf[0][0]);
+		//display vertex
+		glBindVertexArray(vao);  // Draw call
+		glPointSize(size);
+		glDrawArrays(GL_POINTS, 0, 1);
+	}
+};
+
+//Ear Clipping Algorithm
+class EarClipper {
+public:
+	static std::vector<vec2> newTriangle(std::vector<vec2>& polygon, int& index) {
+		std::vector<vec2> triangle;
+		for (int i = index - 1; i <= index + 1; i++) {
+			if (i == -1)
+				triangle.push_back(polygon.back());
+			else if (i == polygon.size())
+				triangle.push_back(polygon.front());
+			triangle.push_back(polygon[i]);
+		}
+		return triangle;
+	}
+	static bool isCrossing(vec2& p1, vec2& p2, vec2& ear1, vec2& ear2) {
+		if (dot(cross(ear2 - ear1, p1 - ear1), cross(ear2 - ear1, p2 - ear1)) < 0 && dot(cross(p2 - p1, ear1 - p1), cross(p2 - p1, ear2 - p1)) < 0)
+			return true;
+		else
+			return false;
+	}
+	static int NumOfCrossing(std::vector<vec2>& margin, vec2& p1, vec2& p2) {
+		int num = 0;
+		for (int i = 0; i < margin.size(); i++) {
+			vec2 endpoint1 = margin[i];
+			vec2 endpoint2;
+			if (i == margin.size() - 1)
+				endpoint2 = margin[0];
+			else
+				endpoint2 = margin[i + 1];
+			if (isCrossing(p1, p2, endpoint1, endpoint2))
+				num++;
+		}
+		return num;
+	}
+	static float getLength(vec2 endpoint1, vec2 endpoint2) {
+		//formula from PowerPoint
+		return sqrtf((endpoint1.x - endpoint2.x) * (endpoint1.x - endpoint2.x) - (endpoint1.y - endpoint2.y) * (endpoint1.y - endpoint2.y));
+	}
+};
+
+class BasePlane {
+private: 
+	const static int nv = 100;
+	std::vector<vec2> vertices;
+
+	vec3 circleColor, lineColor;
+	float thickness;
+
+	unsigned int vao;
+	unsigned int vbo;
+	//createVertices
+
+public:
+	BasePlane(vec3 _circleColor = vec3(1, 0, 0), vec3 _lineColor = vec3(0, 0, 0), float _thickness = 4) :circleColor(_circleColor), lineColor(_lineColor), thickness(_thickness) {
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		for (int i = 0; i < nv; i++) {
+			float phi = i * 2 * (M_PI - 0.0f) / nv + 0.0f;
+			vertices.push_back(vec2(cosf(phi), sinf(phi)));
+		}
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2)*vertices.size(), &vertices[0], GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	}
+	void setLineColor(vec3 _color) { lineColor = _color; }
+	void setCircleColor(vec3 _color) { circleColor = _color; }
+	void setThickness(float _thickness) { thickness = _thickness; }
+	void Display() {
+		//set line color
+		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(colorLocation, lineColor.x, lineColor.y, lineColor.z);
+		//set MVP
+		int MVPLocation = glGetUniformLocation(gpuProgram.getId(), "MVP");
+		glUniformMatrix4fv(MVPLocation, 1, GL_TRUE, &MVPtransf[0][0]);
+		//display base circle
+		glBindVertexArray(vao);  // Draw call
+		glLineWidth(thickness);
+		glDrawArrays(GL_LINE_LOOP, 0, vertices.size());
+
+		//set circle color
+		int CircleColorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(CircleColorLocation, circleColor.x, circleColor.y, circleColor.z);
+		//draw fan
+		glBindVertexArray(vao);  // Draw call
+		glDrawArrays(GL_TRIANGLE_FAN, 0, vertices.size());
+	}
+};
+
+class VertexList {
+private:
+	std::vector<Vertex> vertices;
+public:
+	VertexList(){}
+	void Add(const Vertex& _vertex) {
+		if (vertices.size() < 3)
+			vertices.push_back(_vertex);
+	}
+	Vertex& operator[](int index) { return vertices.at(index); }
+	std::vector<Vertex>& GetVertices() { return vertices; }
+};
+
+class SiriusArc {
+private:
+	Vertex v1, v2;
+	vec2 origin;
+	float radius;
+	std::vector<vec2> vertices;
+	const static int nv = 50;
+	vec3 lineColor;
+	float thickness;
+
+	unsigned int vao;
+	unsigned int vbo;
+public:
+	vec2 getOrigin(const vec2& p1, const vec2& p2) {
+		vec2 origin;
+		origin.y = (((powf(p1.x, 2) - powf(p2.x, 2)) / 2) + ((powf(p1.y, 2) - powf(p2.y, 2)) / 2) -
+			((-1 - powf(p1.x, 2) - powf(p1.y, 2)) * (-1.0f / (2.0f * p1.x)) * (p1.x - p2.x))) / ((2.0 * p1.y) * (-1 / (2 * p1.x)) * (p1.x - p2.x) + (p1.y - p2.y));
+		origin.x = ((-1 - powf(p1.x, 2) - powf(p1.y, 2)) + (2.0 * p1.y * origin.y)) * (-1 / (2 * p1.x));
+		return origin;
+	}
+	float getRadius(vec2& origin) {
+		return sqrtf(fabs(pow(origin.x, 2) + pow(origin.y, 2) - 1));
+	}
+	
+	float getDiff(vec2& origin, Vertex& v1, Vertex& v2) {
+		float angle1 = atan2(v1.getPosition().y - origin.y, v1.getPosition().x - origin.x);
+		float angle2 = atan2(v2.getPosition().y - origin.y, v2.getPosition().x - origin.x);
+
+		if (angle1 - angle2 > M_PI)
+			angle2 = angle2 + 2 * M_PI;
+		//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		if (angle2 - angle1 > M_PI) {
+			angle2 = angle2 - 2 * M_PI;
+		}
+		return angle2 - angle1;
+	}
+	void newVertexList() {
+		float difference = getDiff(origin, v1, v2);
+		for (int i = 0; i < nv; i++) {
+			float phi = getAngle(origin, v1) + i * difference / (nv - 1);
+			vertices.push_back(vec2(cosf(phi), sinf(phi)));
+		}
+	}
+	float getAngle(vec2& origin, Vertex& v) {
+		return atan2(v.getPosition().y - origin.y, v.getPosition().x - origin.x);
+	}
+	SiriusArc(vec2 _v1, vec2 _v2, vec3 _lineColor = vec3(1, 1, 1), float _thickness=4) :v1(_v1), v2(_v2), lineColor(_lineColor), thickness(_thickness) {
+		origin = getOrigin(_v1, _v2);
+		radius = getRadius(origin);
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		newVertexList();
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2)*vertices.size(), &vertices[0], GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	}
+	void Display() {
+		//set MVP
+		mat4 MVPCircle = { radius, 0, 0, 0,    // MVP matrix, 
+				           0, radius, 0, 0,    // row-major!
+				           0, 0, 1, 0,
+				           origin.x, origin.y, 0, 1 };
+		int MVPLocation = glGetUniformLocation(gpuProgram.getId(), "MVP");
+		glUniformMatrix4fv(MVPLocation, 1, GL_TRUE, &MVPCircle[0][0]);
+		//set color
+		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(colorLocation, lineColor.x, lineColor.y, lineColor.z);
+		//display
+		glBindVertexArray(vao);  // Draw call
+		glLineWidth(thickness);
+		glDrawArrays(GL_LINE_STRIP, 0, vertices.size());
+	}
+	float getLength() {
+		float length=0;
+		for (int i = 0;i < vertices.size() - 1;i++) {
+			vec2 endpoint1 = { vertices[i].x * radius + origin.x, vertices[i].y * radius + origin.y };
+			vec2 endpoint2 = { vertices[i + 1].x * radius + origin.x, vertices[i + 1].y * radius + origin.y };
+			float dx = endpoint2.x - endpoint1.x;
+			float dy = endpoint2.y - endpoint1.y;
+			length = length + sqrtf(dx * dx + dy * dy) / (1 - endpoint1.x * endpoint1.x - endpoint1.y - endpoint1.y);
+		}
+		return length;
+	}
+	Vertex& getV1() { return v1; }
+	Vertex& getV2() { return v2; }
+	float getRadius() { return radius; }
+	vec2 getOrigin() { return origin; }
+	std::vector<vec2> getVetices() {
+		return vertices;
+	}
+};
+
+//Used to compare two vec2 objects
+bool operator!=(const vec2& p1, const vec2& p2) {
+	float epsilon = 0.000000001;
+	if (fabs(p1.x - p2.x) > epsilon && fabs(p1.y - p2.y) > epsilon)
+		return true;
+	return false;
+}
+
+class SiriusTriangle {
+private:
+	std::vector<vec2> margin;
+	std::vector<RegularTriangle> triangles;
+	VertexList vertices;     //points
+	unsigned int vao;
+	unsigned int vbo;
+
+
+	void separate() {
+		while (margin.size()>3)
+		{
+			for (int i = 0; i < margin.size(); i++)
+			{
+				std::vector<vec2> _triangle = EarClipper::newTriangle(margin, i);
+				bool isCrossing = false;
+				for (int j = 0;j < margin.size() - 1;j++) {
+					if (margin[j + 1] != _triangle[0] && margin[j] != _triangle[0] && margin[j] != _triangle[0] && margin[j] != _triangle[2])
+						isCrossing = EarClipper::isCrossing(_triangle[0], _triangle[2], margin[j], margin[j + 1]);
+					if (isCrossing)
+						break;
+				}
+				if (isCrossing)
+					continue;
+				vec2 diagonalCenter((_triangle[0].x + _triangle[2].x) / 2, (_triangle[0].y + _triangle[2].y) / 2);
+				//number of crossing
+				int nc=EarClipper::NumOfCrossing(margin, diagonalCenter, vec2(30,30));
+
+				if (nc % 2 == 1) {
+					triangles.push_back(RegularTriangle(_triangle));
+					margin.erase(margin.begin()+i);
+				}
+			}
+		}
+		triangles.push_back(RegularTriangle(margin));
+	}
+public:
+	SiriusTriangle() {}
+
+	VertexList& getVertexList() { return vertices; }
+	std::vector<vec2>& getVertices() { return margin; }
+	void setMargin(std::vector<vec2>& _vertices) { margin = _vertices; }
+
+	void DisplayMargin() {
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vec2)*margin.size(), &margin[0], GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+		//set MVP
+		int MVPLocation = glGetUniformLocation(gpuProgram.getId(), "MVP");
+		glUniformMatrix4fv(MVPLocation, 1, GL_TRUE, &MVPtransf[0][0]);
+		//set color
+		setColor(vec3(1, 1, 1));
+		//display
+		glBindVertexArray(vao);  // Draw call
+		glLineWidth(4);
+		glDrawArrays(GL_LINE_LOOP, 0, margin.size());
+	}
+	static void setColor(const vec3& color) {
+		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
+		glUniform3f(colorLocation, color.x, color.y, color.z);
+	}
+
+	void Fill() {
+		separate();
+		for each (RegularTriangle triangle in triangles)
+		{
+			triangle.Display();
+		}
+	}
+
+	void DisplayVertices() {
+		for each (Vertex vertex in vertices.GetVertices())
+		{
+			vertex.setColor(vec3(1, 1, 1));
+			vertex.setSize(8);
+			vertex.Display();
+		}
+	}
+};
+
+SiriusTriangle siriusTriangle;
+
+// Initialization, create an OpenGL context
+void onInitialization() {
+	glViewport(0, 0, windowWidth, windowHeight);
+	// create program for the GPU
+	gpuProgram.create(vertexSource, fragmentSource, "outColor");
+}
+
+void onDisplay() {
+	glClearColor(0, 0, 0, 0);
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	BasePlane baseplane;
+	baseplane.setCircleColor(vec3(0.5, 0.5, 0.5));
+	baseplane.Display();
+
+	for (int i = 0;i < siriusTriangle.getVertexList().GetVertices().size();i++) {
+		siriusTriangle.getVertexList()[i].Display();
+	}
+
+	if (siriusTriangle.getVertexList().GetVertices().size() == 3) {
+		//edges of Sirius Triangle
+		SiriusArc edges[3] = {
+			SiriusArc(siriusTriangle.getVertexList()[0].getPosition(), siriusTriangle.getVertexList()[1].getPosition()),
+			SiriusArc(siriusTriangle.getVertexList()[1].getPosition(), siriusTriangle.getVertexList()[2].getPosition()),
+			SiriusArc(siriusTriangle.getVertexList()[2].getPosition(), siriusTriangle.getVertexList()[0].getPosition())
+		};
+		std::vector<vec2> vertices;
+		for each (SiriusArc edge in edges)
+		{
+			for (int i = 0; i < edge.getVetices().size() - 1;i++) {
+				vec2 v = { edge.getVetices()[i].x * edge.getRadius() + edge.getOrigin().x,edge.getVetices()[i].y * edge.getRadius() + edge.getOrigin().y };
+				vertices.push_back(v);
+			}
+		}
+		siriusTriangle.setMargin(vertices);
+		siriusTriangle.DisplayMargin();
+		siriusTriangle.Fill();
+		siriusTriangle.DisplayVertices();
+
+		printf("Length of each edge is as following: \n");
+		printf("edge1: %.3f   edge2: %.3f   edge3: %.3f\n", edges[0].getLength(), edges[1].getLength(), edges[2].getLength());
+	}
+	glutSwapBuffers(); // exchange buffers for double buffering
+}
+
+// Key of ASCII code pressed
+void onKeyboard(unsigned char key, int pX, int pY) {
+	if (key == 'd') glutPostRedisplay();         // if d, invalidate display, i.e. redraw
+}
+
+// Key of ASCII code released
+void onKeyboardUp(unsigned char key, int pX, int pY) {
+}
+
+// Move mouse with key pressed
+void onMouseMotion(int pX, int pY) {	// pX, pY are the pixel coordinates of the cursor in the coordinate system of the operation system
+	// Convert to normalized device space
+	float cX = 2.0f * pX / windowWidth - 1;	// flip y axis
+	float cY = 1.0f - 2.0f * pY / windowHeight;
+	printf("Mouse moved to (%3.2f, %3.2f)\n", cX, cY);
+}
+
+// Mouse click event
+void onMouse(int button, int state, int pX, int pY) { // pX, pY are the pixel coordinates of the cursor in the coordinate system of the operation system
+	// Convert to normalized device space
+	float cX = 2.0f * pX / windowWidth - 1;	// flip y axis
+	float cY = 1.0f - 2.0f * pY / windowHeight;
+
+	char* buttonStat;
+	switch (state)
+	{
+	case GLUT_DOWN:
+		if (sqrtf(cX * cX + cY * cY) <= 1)
+			siriusTriangle.getVertexList().Add(vec2(cX, cY));
+		buttonStat = "pressed";
+		break;
+	case GLUT_UP:
+		buttonStat = "released";
+		break;
+	default:
+		break;
+	}
+
+	switch (button) {
+	case GLUT_LEFT_BUTTON:   printf("Left button %s at (%3.2f, %3.2f)\n", buttonStat, cX, cY);   break;
+	case GLUT_MIDDLE_BUTTON: printf("Middle button %s at (%3.2f, %3.2f)\n", buttonStat, cX, cY); break;
+	case GLUT_RIGHT_BUTTON:  printf("Right button %s at (%3.2f, %3.2f)\n", buttonStat, cX, cY);  break;
+	}
+}
+
+// Idle event indicating that some time elapsed: do animation here
+void onIdle() {
+	long time = glutGet(GLUT_ELAPSED_TIME); // elapsed time since the start of the program
+}
